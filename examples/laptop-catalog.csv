@@ -1,0 +1,4 @@
+product_id,title,sku,brand,category,description,price,currency,availability,url,attribute.ram_gb,attribute.display,attribute.battery_hours
+laptop-northstar-14,Northstar Studio 14,NS-14-32,Northern Light,Computers,"A lightweight laptop for photo editing, travel, and everyday creative work.",1299.00,USD,IN_STOCK,https://shop.example.invalid/products/northstar-studio-14,32,OLED,12
+laptop-cedar-air-13,Cedar Air 13,CA-13-16,Cedar Works,Computers,"A compact laptop designed for classes, writing, and daily use.",899.00,USD,IN_STOCK,https://shop.example.invalid/products/cedar-air-13,16,IPS,
+laptop-harbor-pro-16,Harbor Pro 16,HP-16-32,Harbor Systems,Computers,"A larger performance laptop for editing, research, and demanding workloads.",1599.00,USD,OUT_OF_STOCK,https://shop.example.invalid/products/harbor-pro-16,32,OLED,10
