@@ -10,11 +10,10 @@ import com.kaviyo.backend.ai.DraftRevisionService;
 import com.kaviyo.backend.ai.MetaEvidenceDraftService;
 import com.kaviyo.backend.ai.ModelProviderException;
 import com.kaviyo.backend.ai.ModelRunRepository;
-import com.kaviyo.backend.ai.ShopperQuestionSetService;
 import com.kaviyo.backend.catalog.CatalogImportPersistenceException;
 import com.kaviyo.backend.catalog.CatalogImportRepository;
 import com.kaviyo.backend.scan.ScanRepository;
-import com.kaviyo.importer.CatalogImportMapper;
+import com.kaviyo.backend.workspace.WorkspaceContext;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
@@ -36,13 +35,7 @@ import java.util.UUID;
 @Produces(MediaType.APPLICATION_JSON)
 public final class ProductDiscoveryResource {
     @Inject
-    MetaEvidenceDraftService metaEvidenceDraftService;
-
-    @Inject
     BasetenDiscoverySimulationService simulationService;
-
-    @Inject
-    ShopperQuestionSetService shopperQuestionSetService;
 
     @Inject
     DraftRevisionService draftRevisionService;
@@ -59,64 +52,8 @@ public final class ProductDiscoveryResource {
     @Inject
     ObjectMapper objectMapper;
 
-    @POST
-    @Path("/scans/{scanRunId}/products/{productId}/drafts")
-    public Response createDraft(
-            @PathParam("scanRunId") String scanRunId,
-            @PathParam("productId") String productId,
-            DraftRequest request) {
-        UUID scanId = uuidOrNull(scanRunId);
-        if (scanId == null) return badRequest("SCAN_ID_INVALID", "scanRunId must be a UUID.");
-        if (productId == null || productId.isBlank() || productId.length() > 180) {
-            return badRequest("PRODUCT_ID_INVALID", "productId must be a nonblank catalog identifier.");
-        }
-        if (request == null || request.findingCode() == null || request.shopperQuestion() == null) {
-            return badRequest("DRAFT_REQUEST_INVALID", "findingCode and shopperQuestion are required.");
-        }
-        try {
-            return Response.status(Response.Status.CREATED)
-                    .entity(metaEvidenceDraftService.createDraft(
-                            CatalogImportMapper.LOCAL_DEMO_WORKSPACE_ID,
-                            scanId, productId, request.findingCode(), request.shopperQuestion()))
-                    .build();
-        } catch (MetaEvidenceDraftService.WorkflowRequestException exception) {
-            return error(exception.status(), exception.code(), exception.getMessage());
-        } catch (ModelProviderException exception) {
-            return error(exception.httpStatus(), exception.code(), exception.getMessage());
-        } catch (CatalogImportPersistenceException exception) {
-            return error(503, "DRAFT_PERSISTENCE_UNAVAILABLE", "The draft workflow could not access saved evidence.");
-        }
-    }
-
-    @POST
-    @Path("/scans/{scanRunId}/products/{productId}/shopper-question-set")
-    public Response generateShopperQuestionSet(
-            @PathParam("scanRunId") String scanRunId,
-            @PathParam("productId") String productId,
-            ShopperQuestionSetRequest request) {
-        UUID scanId = uuidOrNull(scanRunId);
-        if (scanId == null) return badRequest("SCAN_ID_INVALID", "scanRunId must be a UUID.");
-        if (productId == null || productId.isBlank() || productId.length() > 180) {
-            return badRequest("PRODUCT_ID_INVALID", "productId must be a nonblank catalog identifier.");
-        }
-        if (request == null || request.shopperGoal() == null) {
-            return badRequest("QUESTION_SET_REQUEST_INVALID", "shopperGoal is required.");
-        }
-        try {
-            return Response.status(Response.Status.CREATED)
-                    .entity(shopperQuestionSetService.generate(
-                            CatalogImportMapper.LOCAL_DEMO_WORKSPACE_ID,
-                            scanId, productId, request.shopperGoal()))
-                    .build();
-        } catch (MetaEvidenceDraftService.WorkflowRequestException exception) {
-            return error(exception.status(), exception.code(), exception.getMessage());
-        } catch (ModelProviderException exception) {
-            return error(exception.httpStatus(), exception.code(), exception.getMessage());
-        } catch (CatalogImportPersistenceException exception) {
-            return error(503, "QUESTION_SET_PERSISTENCE_UNAVAILABLE",
-                    "The question-set workflow could not access saved evidence.");
-        }
-    }
+    @Inject
+    WorkspaceContext workspaceContext;
 
     @GET
     @Path("/drafts")
@@ -128,7 +65,7 @@ public final class ProductDiscoveryResource {
         }
         try {
             return Response.ok(new DraftList("SYNTHETIC_DEMO", draftRepository.list(
-                    CatalogImportMapper.LOCAL_DEMO_WORKSPACE_ID, scanId),
+                    workspaceContext.workspaceId(), scanId),
                     "Drafts are scoped to the local demo workspace. Authentication and tenant isolation are not implemented."))
                     .build();
         } catch (CatalogImportPersistenceException exception) {
@@ -142,7 +79,7 @@ public final class ProductDiscoveryResource {
         UUID id = uuidOrNull(draftId);
         if (id == null) return badRequest("DRAFT_ID_INVALID", "draftId must be a UUID.");
         try {
-            return draftRepository.get(CatalogImportMapper.LOCAL_DEMO_WORKSPACE_ID, id)
+            return draftRepository.get(workspaceContext.workspaceId(), id)
                     .<Response>map(draft -> Response.ok(new DraftResponse("SYNTHETIC_DEMO", draft)).build())
                     .orElseGet(() -> error(404, "DRAFT_NOT_FOUND", "No saved draft exists with that ID."));
         } catch (CatalogImportPersistenceException exception) {
@@ -156,7 +93,7 @@ public final class ProductDiscoveryResource {
         UUID id = uuidOrNull(modelRunId);
         if (id == null) return badRequest("MODEL_RUN_ID_INVALID", "modelRunId must be a UUID.");
         try {
-            return modelRunRepository.get(CatalogImportMapper.LOCAL_DEMO_WORKSPACE_ID, id)
+            return modelRunRepository.get(workspaceContext.workspaceId(), id)
                     .<Response>map(run -> Response.ok(new ModelRunResponse("SYNTHETIC_DEMO", run,
                             "Audit trace for a controlled Meta-model task. It is not a live assistant result."))
                             .build())
@@ -173,10 +110,10 @@ public final class ProductDiscoveryResource {
         if (id == null) return badRequest("DRAFT_ID_INVALID", "draftId must be a UUID.");
         try {
             DraftRepository.DraftRecord draft = draftRepository.get(
-                    CatalogImportMapper.LOCAL_DEMO_WORKSPACE_ID, id).orElse(null);
+                    workspaceContext.workspaceId(), id).orElse(null);
             if (draft == null) return error(404, "DRAFT_NOT_FOUND", "No saved draft exists with that ID.");
             CatalogImportRepository.CatalogProductSnapshot product = scanRepository.capturedProduct(
-                    CatalogImportMapper.LOCAL_DEMO_WORKSPACE_ID, draft.scanRunId(), draft.productId()).orElse(null);
+                    workspaceContext.workspaceId(), draft.scanRunId(), draft.productId()).orElse(null);
             if (product == null) return error(409, "PRODUCT_SNAPSHOT_NOT_FOUND", "The saved product facts are unavailable.");
             ObjectNode structuredData = productJsonLd(product, draft.revision().proposedValue());
             return Response.ok(new DraftPreview("SYNTHETIC_DEMO", draft, product.description(),
@@ -207,13 +144,13 @@ public final class ProductDiscoveryResource {
         }
         try {
             DraftRepository.DraftRecord current = draftRepository.get(
-                    CatalogImportMapper.LOCAL_DEMO_WORKSPACE_ID, id).orElse(null);
+                    workspaceContext.workspaceId(), id).orElse(null);
             if (current == null) return error(404, "DRAFT_NOT_FOUND", "No saved draft exists with that ID.");
             if (!"NEEDS_REVIEW".equals(current.status())) {
                 return error(409, "DRAFT_ALREADY_DECIDED", "Only a draft awaiting review can receive a decision.");
             }
             DraftRepository.DraftRecord updated = draftRepository.decide(
-                    CatalogImportMapper.LOCAL_DEMO_WORKSPACE_ID, id,
+                    workspaceContext.workspaceId(), id,
                     request.decision(), request.note(), Instant.now()).orElse(null);
             if (updated == null) return error(409, "DRAFT_ALREADY_DECIDED", "The draft changed before the decision was saved.");
             return Response.ok(new DraftResponse("SYNTHETIC_DEMO", updated,
@@ -233,7 +170,7 @@ public final class ProductDiscoveryResource {
         try {
             return Response.status(Response.Status.CREATED)
                     .entity(draftRevisionService.createRevision(
-                            CatalogImportMapper.LOCAL_DEMO_WORKSPACE_ID, id, request))
+                            workspaceContext.workspaceId(), id, request))
                     .build();
         } catch (MetaEvidenceDraftService.WorkflowRequestException exception) {
             return error(exception.status(), exception.code(), exception.getMessage());
@@ -249,7 +186,7 @@ public final class ProductDiscoveryResource {
         if (id == null) return badRequest("DRAFT_ID_INVALID", "draftId must be a UUID.");
         try {
             DraftRepository.ChangePacket packet = draftRepository.exportApproved(
-                    CatalogImportMapper.LOCAL_DEMO_WORKSPACE_ID, id, Instant.now()).orElse(null);
+                    workspaceContext.workspaceId(), id, Instant.now()).orElse(null);
             if (packet == null) {
                 return error(409, "DRAFT_NOT_APPROVED", "Approve the draft before exporting a change packet.");
             }
@@ -271,7 +208,7 @@ public final class ProductDiscoveryResource {
         try {
             return Response.status(Response.Status.CREATED)
                     .entity(simulationService.simulate(
-                            CatalogImportMapper.LOCAL_DEMO_WORKSPACE_ID, id, request.shopperQuestion()))
+                            workspaceContext.workspaceId(), id, request.shopperQuestion()))
                     .build();
         } catch (MetaEvidenceDraftService.WorkflowRequestException exception) {
             return error(exception.status(), exception.code(), exception.getMessage());
@@ -321,8 +258,6 @@ public final class ProductDiscoveryResource {
         return jsonLd;
     }
 
-    public record DraftRequest(String findingCode, String shopperQuestion) { }
-    public record ShopperQuestionSetRequest(String shopperGoal) { }
     public record SimulationRequest(String shopperQuestion) { }
     public record DecisionRequest(String decision, String note) { }
     public record ApiError(String code, String message) { }
