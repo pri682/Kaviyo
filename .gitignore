@@ -15,7 +15,8 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
-.vscode/
+.vscode/*
+!.vscode/mcp.json
 .idea/
 *.log
 *.md
