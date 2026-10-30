@@ -32,6 +32,10 @@ public class MetaEvidenceDraftService {
     private static final int MAX_TOOL_TURNS = 4;
     private static final int MAX_TOOL_CALLS = 6;
     private static final int MAX_QUESTION_LENGTH = 600;
+    // Caps are ceilings, not spend: the API bills actual tokens, so headroom is free insurance.
+    // Tool turns need room for the model's reasoning trace plus the tool call itself.
+    private static final int TOOL_TURN_COMPLETION_TOKENS = 4000;
+    private static final int FINAL_COMPLETION_TOKENS = 6000;
     private static final Pattern NUMBER = Pattern.compile("\\b\\d+(?:[.,]\\d+)?\\b");
     private static final Set<String> DRAFTABLE_FINDINGS = Set.of("DESCRIPTION_MISSING", "DESCRIPTION_THIN");
 
@@ -78,13 +82,13 @@ public class MetaEvidenceDraftService {
                 .findFirst()
                 .orElseThrow(() -> new WorkflowRequestException("FINDING_NOT_FOUND",
                         "The selected description finding does not exist in this scan.", 404));
-        UUID findingId = scanRepository.findingId(workspaceId, scanRunId, externalProductId, findingCode)
-                .orElseThrow(() -> new WorkflowRequestException("FINDING_NOT_PERSISTED",
-                        "The saved finding could not be linked to a draft.", 409));
         CatalogImportRepository.CatalogProductSnapshot product = scanRepository
                 .capturedProduct(workspaceId, scanRunId, externalProductId)
                 .orElseThrow(() -> new WorkflowRequestException("PRODUCT_SNAPSHOT_NOT_FOUND",
                         "The scan-time product facts are unavailable.", 409));
+        UUID findingId = scanRepository.findingId(workspaceId, scanRunId, product.id(), findingCode)
+                .orElseThrow(() -> new WorkflowRequestException("FINDING_NOT_PERSISTED",
+                        "The saved finding could not be linked to a draft.", 409));
 
         Instant startedAt = Instant.now();
         List<String> usedTools = new ArrayList<>();
@@ -95,7 +99,15 @@ public class MetaEvidenceDraftService {
         EvidenceScope scope = evidenceScope(product);
 
         try {
-            AgentOutput agentOutput = runEvidenceAgent(product, issue, shopperQuestion, scope);
+            // Sampling variance occasionally truncates one attempt; a single fresh retry
+            // usually succeeds, and a second truncation still fails honestly below.
+            AgentOutput agentOutput;
+            try {
+                agentOutput = runEvidenceAgent(product, issue, shopperQuestion, scope);
+            } catch (ModelProviderException retryable) {
+                if (!"MODEL_OUTPUT_TRUNCATED".equals(retryable.code())) throw retryable;
+                agentOutput = runEvidenceAgent(product, issue, shopperQuestion, scope);
+            }
             usedTools = agentOutput.toolNames();
             promptTokens = agentOutput.promptTokens();
             completionTokens = agentOutput.completionTokens();
@@ -173,7 +185,7 @@ public class MetaEvidenceDraftService {
         boolean finalWithoutToolCalls = false;
         for (int turn = 0; turn < MAX_TOOL_TURNS; turn++) {
             ObjectNode request = objectMapper.createObjectNode();
-            request.put("max_completion_tokens", 700);
+            request.put("max_completion_tokens", TOOL_TURN_COMPLETION_TOKENS);
             request.put("store", false);
             request.put("parallel_tool_calls", false);
             request.put("tool_choice", "auto");
@@ -211,6 +223,8 @@ public class MetaEvidenceDraftService {
                 toolMessage.put("content", json(execution.result()));
                 messages.add(toolMessage);
             }
+            if (toolsUsed.contains("read_confirmed_product_facts")
+                    && toolsUsed.contains("read_scan_finding")) break;
         }
         if (callCount == 0 || !toolsUsed.contains("read_confirmed_product_facts")
                 || !toolsUsed.contains("read_scan_finding")) {
@@ -223,22 +237,45 @@ public class MetaEvidenceDraftService {
         }
 
         // The final separate call uses a strict schema. The preceding calls are the agent's actual tool loop.
+        messages.add(message("developer", "Using only the product facts and finding returned by your tools, write a concise product description, explain why, and provide exact source citations for every factual phrase. Use JSON schema output exactly. Quote each copy_fragment as an exact substring of its source_value: never expand terse values (from \"16\" quote \"16\", not \"16 GB RAM\"). If a value is too short to quote naturally, omit that claim. If evidence is not sufficient, keep the description modest and cite only supported facts."));
+        messages.add(message("user", "Return the description draft for " + product.title()
+                + ". Cite catalog facts using their evidence_id and include the exact source_value plus the exact copy_fragment used in the description."));
+        FinalDraft first = requestFinalDraft(messages);
+        promptTokens += first.promptTokens();
+        completionTokens += first.completionTokens();
+        JsonNode parsed = first.parsed();
+        ObjectNode check = validateDraft(parsed, scope);
+        if (!check.path("valid").asBoolean()) {
+            // One self-correction round: the model sees its own output plus the failing
+            // check codes and may fix the citations. A second failure stays honest (422).
+            messages.add(message("assistant", json(parsed)));
+            messages.add(message("user", "That draft failed Kaviyo's evidence checks: "
+                    + check.path("errors") + ". Rewrite the draft fixing every listed error: "
+                    + "each copy_fragment must be an exact substring of its source_value and must appear in the description. Drop claims you cannot quote exactly."));
+            FinalDraft second = requestFinalDraft(messages);
+            promptTokens += second.promptTokens();
+            completionTokens += second.completionTokens();
+            parsed = second.parsed();
+        }
+        return new AgentOutput(parsed, List.copyOf(toolsUsed), promptTokens, completionTokens);
+    }
+
+    private FinalDraft requestFinalDraft(ArrayNode messages) {
         ObjectNode finalRequest = objectMapper.createObjectNode();
-        finalRequest.put("max_completion_tokens", 900);
+        finalRequest.put("max_completion_tokens", FINAL_COMPLETION_TOKENS);
         finalRequest.put("store", false);
         finalRequest.set("messages", messages.deepCopy());
-        ArrayNode finalMessages = (ArrayNode) finalRequest.path("messages");
-        finalMessages.add(message("developer", "Using only the product facts and finding returned by your tools, write a concise product description, explain why, and provide exact source citations for every factual phrase. Use JSON schema output exactly. If evidence is not sufficient, keep the description modest and cite only supported facts."));
-        finalMessages.add(message("user", "Return the description draft for " + product.title()
-                + ". Cite catalog facts using their evidence_id and include the exact source_value plus the exact copy_fragment used in the description."));
         finalRequest.set("response_format", draftResponseFormat());
         JsonNode response = metaSparkClient.complete(finalRequest);
-        promptTokens += response.path("usage").path("prompt_tokens").asInt(0);
-        completionTokens += response.path("usage").path("completion_tokens").asInt(0);
         String content = firstChoice(response).path("message").path("content").asText("");
         try {
-            return new AgentOutput(objectMapper.readTree(content), List.copyOf(toolsUsed),
-                    promptTokens, completionTokens);
+            JsonNode parsed = objectMapper.readTree(content);
+            if (parsed == null || !parsed.isObject()) {
+                throw new ModelProviderException("MODEL_OUTPUT_EMPTY",
+                        "Muse Spark returned an empty structured draft. Retry the request.", 502, null);
+            }
+            return new FinalDraft(parsed, response.path("usage").path("prompt_tokens").asInt(0),
+                    response.path("usage").path("completion_tokens").asInt(0));
         } catch (JsonProcessingException exception) {
             throw new ModelProviderException("MODEL_OUTPUT_INVALID_JSON",
                     "Muse Spark did not return valid structured JSON.", 502, exception);
@@ -399,6 +436,13 @@ public class MetaEvidenceDraftService {
             throw new ModelProviderException("MODEL_RESPONSE_SHAPE_INVALID",
                     "The model response did not contain a chat completion message.", 502, null);
         }
+        if ("length".equals(choices.get(0).path("finish_reason").asText())) {
+            JsonNode usage = response.path("usage");
+            throw new ModelProviderException("MODEL_OUTPUT_TRUNCATED",
+                    "Muse Spark ran out of completion tokens before answering (prompt "
+                            + usage.path("prompt_tokens").asInt(-1) + ", completion "
+                            + usage.path("completion_tokens").asInt(-1) + "). Retry the request.", 502, null);
+        }
         return choices.get(0);
     }
 
@@ -443,6 +487,8 @@ public class MetaEvidenceDraftService {
     private record AgentOutput(JsonNode output, List<String> toolNames,
                                int promptTokens, int completionTokens) {
     }
+
+    private record FinalDraft(JsonNode parsed, int promptTokens, int completionTokens) { }
 
     private record ToolExecution(JsonNode result, boolean success) { }
 
