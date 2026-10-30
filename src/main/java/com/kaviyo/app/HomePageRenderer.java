@@ -11,7 +11,7 @@ public final class HomePageRenderer {
                   <meta charset="utf-8">
                   <meta name="viewport" content="width=device-width, initial-scale=1">
                   <meta name="color-scheme" content="light">
-                  <meta name="description" content="Kaviyo helps merchants find missing or conflicting product details that can hide product value across AI discovery, search, and storefronts.">
+                  <meta name="description" content="Kaviyo helps merchants understand how product facts support the needs shoppers bring to AI agents.">
                   <title>Kaviyo | Product facts for AI shopping</title>
                   <style>
                 """);
@@ -41,6 +41,15 @@ public final class HomePageRenderer {
                     background: var(--color-parchment);
                     font-family: Inter, "Helvetica Neue", Arial, sans-serif;
                   }
+                  .home-page[data-theme="dark"] {
+                    --color-parchment: #1f1f29; --color-paper: #282834; --color-linen: #302e3b;
+                    --color-ink-black: #f7f6f5; --color-graphite: #ebe9e9; --color-charcoal: #d6d2d5;
+                    --color-ash: #c0bcc2; --color-fog: #77727d; --color-mist: #494652;
+                    --canvas: var(--color-parchment); --paper: var(--color-paper); --ink: var(--color-ink-black);
+                    --muted: var(--color-ash); --quiet: #aaa5af; --line: var(--color-mist);
+                  }
+                  .home-page[data-theme="dark"] .home-nav .nav-action,
+                  .home-page[data-theme="dark"] .home-close .home-primary { color: #171717; }
                   .home-page h1, .home-page h2, .home-page h3 {
                     font-family: "ppmondwest", "Iowan Old Style", Georgia, serif;
                     font-weight: 400;
@@ -95,6 +104,8 @@ public final class HomePageRenderer {
                   .home-nav nav { display: flex; align-items: center; gap: 5px; }
                   .home-nav nav a { padding: 9px 13px; border-radius: 999px; color: rgba(255,255,255,.9); font-size: 12px; text-decoration: none; transition: background-color .2s ease; }
                   .home-nav nav a:hover { background: rgba(255,255,255,.14); }
+                  .theme-toggle { display: inline-grid; width: 34px; height: 34px; place-items: center; border: 1px solid rgba(255,255,255,.28); border-radius: 50%; background: transparent; color: inherit; font-size: 17px; cursor: pointer; }
+                  .theme-toggle:focus-visible { outline: 2px solid #8dd7ef; outline-offset: 3px; }
                   .home-nav .nav-action {
                     justify-self: end;
                     display: inline-flex;
@@ -342,8 +353,10 @@ public final class HomePageRenderer {
                       <nav aria-label="Page navigation">
                         <a href="#how-kaviyo-helps">How it helps</a>
                         <a href="#discovery-flow">Product flow</a>
+                        <a href="/discovery">Discovery workspace</a>
+                        <button class="theme-toggle" data-theme-toggle type="button" aria-pressed="false" aria-label="Switch to dark mode">◐</button>
                       </nav>
-                      <a class="nav-action" href="/audit/start">Try the sample <span aria-hidden="true">↗</span></a>
+                      <a class="nav-action" href="/discovery">Check my product page <span aria-hidden="true">↗</span></a>
                     </header>
                     <div class="hero-sequence" data-hero-sequence>
                     <section class="home-hero" aria-labelledby="home-title">
@@ -489,17 +502,17 @@ public final class HomePageRenderer {
                       <div class="hero-veil" aria-hidden="true"></div>
                       <div class="hero-story">
                       <p class="hero-kicker">AI is changing how shoppers compare products.</p>
-                      <h1 id="home-title">Get your products ready for AI shopping.</h1>
-                      <p>When a shopper asks for a laptop with specific specs, assistants compare the product details they can find. Kaviyo spots missing or conflicting facts across your catalog and pages, so your team can make product fit easier to understand.</p>
+                      <h1 id="home-title">Help AI agents understand where your products fit.</h1>
+                        <p>Shopping agents shape how buyers compare products. Kaviyo helps your team bring in a catalog, connect product facts to real buyer needs, and see what still needs evidence.</p>
                         <div class="hero-actions">
                           <a class="hero-primary" href="#how-kaviyo-helps">See how Kaviyo helps <span aria-hidden="true">↓</span></a>
-                          <a class="hero-secondary" href="/audit/start">Try a sample audit</a>
+                          <a class="hero-secondary" href="/discovery">Check a product page</a>
                         </div>
                         <p class="hero-truth">Clear details help people compare. Shoppers and assistants make the final choice.</p>
                       </div>
                       <aside class="hero-notification" aria-label="Sample product finding">
                         <span class="notification-mark" aria-hidden="true">↕</span>
-                        <span class="notification-copy"><span class="notification-label">Synthetic example</span><strong>A key product spec needs a review</strong><small>Demo laptop · 32 GB RAM is missing from the page</small></span>
+                        <span class="notification-copy"><span class="notification-label">Synthetic discovery opportunity</span><strong>A shopper need is not yet supported by clear evidence</strong><small>Demo daypack · fit for a 15-inch laptop is not established</small></span>
                         <a class="notification-open" href="/audit/start" aria-label="Open the sample audit">↗</a>
                       </aside>
                       <a class="scroll-cue" href="#how-kaviyo-helps"><span aria-hidden="true"></span>Keep going</a>
@@ -511,7 +524,7 @@ public final class HomePageRenderer {
                       <div class="growth-intro">
                         <p class="eyebrow">Make the value easier to see</p>
                         <h2 id="growth-title">Help your product make its case.</h2>
-                        <p>Buyers compare options across assistants, search, and storefronts. Missing details or mixed signals can hide why a product is worth choosing. Kaviyo checks the information your business controls and shows your team what to verify.</p>
+                        <p>Agents choose their own recommendations. Merchants can still make products easier to evaluate by keeping fit-critical facts clear, consistent, and supported by evidence. Kaviyo helps teams see where a product matches a mission and where uncertainty remains.</p>
                       </div>
                       <div class="growth-track" data-growth-track>
                         <div class="growth-scene" data-scroll-story data-growth="1" aria-hidden="true">
@@ -637,14 +650,15 @@ public final class HomePageRenderer {
                     </section>
 
                     <section class="home-close" aria-labelledby="close-title">
-                      <p class="eyebrow">See it with a sample catalog</p>
-                      <h2 id="close-title">Find what is getting in the way of a clear product story.</h2>
-                      <p>Review a fictional catalog, compare saved page evidence, and see how a finding becomes a practical next step.</p>
-                      <a class="action-link home-primary" href="/audit/start">Start the sample audit <span aria-hidden="true">↗</span></a>
+                      <p class="eyebrow">Start with your business</p>
+                      <h2 id="close-title">Make product fit easier for agents to understand.</h2>
+                      <p>Bring in your catalog, choose a buyer need, and explore a controlled agent simulation.</p>
+                      <a class="action-link home-primary" href="/discovery">Set up your business <span aria-hidden="true">↗</span></a>
                     </section>
                   </main>
                   <footer class="footer home-footer"><span>Kaviyo</span><span>Sample walkthrough uses synthetic data</span><a href="/how-it-works">How it works</a></footer>
                   <script src="/assets/home-scroll-story.js" defer></script>
+                  <script src="/assets/theme.js" defer></script>
                 </body>
                 </html>
                 """);
