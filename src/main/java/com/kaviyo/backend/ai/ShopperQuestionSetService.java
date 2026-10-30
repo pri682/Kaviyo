@@ -30,6 +30,10 @@ public class ShopperQuestionSetService {
     private static final int MAX_TOOL_TURNS = 3;
     private static final int MAX_TOOL_CALLS = 4;
     private static final int QUESTION_COUNT = 3;
+    // Caps are ceilings, not spend: the API bills actual tokens, so headroom is free insurance.
+    // Tool turns need room for the model's reasoning trace plus the tool call itself.
+    private static final int TOOL_TURN_COMPLETION_TOKENS = 4000;
+    private static final int FINAL_COMPLETION_TOKENS = 6000;
     private static final String LIMITATION = "Muse-generated test questions based on confirmed catalog facts and this merchant-provided goal. They are not observed customer demand, search volume, or real assistant prompts.";
 
     @Inject
@@ -70,7 +74,15 @@ public class ShopperQuestionSetService {
         int promptTokens = 0;
         int completionTokens = 0;
         try {
-            AgentOutput result = runAgent(product, observation.report().issues(), shopperGoal, scope);
+            // Sampling variance occasionally truncates one attempt; a single fresh retry
+            // usually succeeds, and a second truncation still fails honestly below.
+            AgentOutput result;
+            try {
+                result = runAgent(product, observation.report().issues(), shopperGoal, scope);
+            } catch (ModelProviderException retryable) {
+                if (!"MODEL_OUTPUT_TRUNCATED".equals(retryable.code())) throw retryable;
+                result = runAgent(product, observation.report().issues(), shopperGoal, scope);
+            }
             output = result.output();
             usedTools = result.toolNames();
             promptTokens = result.promptTokens();
@@ -130,7 +142,7 @@ public class ShopperQuestionSetService {
         boolean finalWithoutToolCalls = false;
         for (int turn = 0; turn < MAX_TOOL_TURNS; turn++) {
             ObjectNode request = objectMapper.createObjectNode();
-            request.put("max_completion_tokens", 500);
+            request.put("max_completion_tokens", TOOL_TURN_COMPLETION_TOKENS);
             request.put("store", false);
             request.put("parallel_tool_calls", false);
             request.put("tool_choice", "auto");
@@ -167,6 +179,8 @@ public class ShopperQuestionSetService {
                 toolMessage.put("content", json(toolResult.result()));
                 messages.add(toolMessage);
             }
+            if (toolsUsed.contains("read_confirmed_product_facts")
+                    && toolsUsed.contains("read_scan_findings")) break;
         }
         if (callCount == 0 || !toolsUsed.contains("read_confirmed_product_facts")
                 || !toolsUsed.contains("read_scan_findings")) {
@@ -178,22 +192,47 @@ public class ShopperQuestionSetService {
                     "Muse Spark did not finish within the evidence-read limit.", 422, null);
         }
 
-        ObjectNode finalRequest = objectMapper.createObjectNode();
-        finalRequest.put("max_completion_tokens", 700);
-        finalRequest.put("store", false);
-        ArrayNode finalMessages = finalRequest.putArray("messages");
-        finalMessages.addAll(messages);
-        finalMessages.add(message("developer", "Using only tool-returned product facts, create three shopping questions. Each must cite one or more exact source fragments with evidence_id, source_value, and query_fragment. The query_fragment must appear verbatim in both source_value and question. Use the required JSON schema."));
-        finalMessages.add(message("user", "Return exactly three grounded shopper test questions for "
+        messages.add(message("developer", "Using only tool-returned product facts, create three shopping questions. Each must cite one or more exact source fragments with evidence_id, source_value, and query_fragment. The query_fragment must appear verbatim in both source_value and question. Quote fragments as exact substrings: never expand terse values (from \"16\" quote \"16\", not \"16 GB RAM\"). If a value is too short to quote naturally, cite a longer fact instead. Use the required JSON schema."));
+        messages.add(message("user", "Return exactly three grounded shopper test questions for "
                 + product.title() + "."));
+        FinalSet first = requestFinalSet(messages);
+        promptTokens += first.promptTokens();
+        completionTokens += first.completionTokens();
+        JsonNode parsed = first.parsed();
+        ObjectNode check = validate(parsed, scope);
+        if (!check.path("valid").asBoolean()) {
+            // One self-correction round: the model sees its own output plus the failing
+            // check codes and may fix the citations. A second failure stays honest (422).
+            messages.add(message("assistant", json(parsed)));
+            messages.add(message("user", "Those questions failed Kaviyo's evidence checks: "
+                    + check.path("errors") + ". Rewrite them fixing every listed error: "
+                    + "each query_fragment must appear verbatim in both its source_value and its question; "
+                    + "each question must be 24-280 characters ending with '?'; exactly three distinct questions. "
+                    + "Drop or rewrite citations you cannot quote exactly."));
+            FinalSet second = requestFinalSet(messages);
+            promptTokens += second.promptTokens();
+            completionTokens += second.completionTokens();
+            parsed = second.parsed();
+        }
+        return new AgentOutput(parsed, List.copyOf(toolsUsed), promptTokens, completionTokens);
+    }
+
+    private FinalSet requestFinalSet(ArrayNode messages) {
+        ObjectNode finalRequest = objectMapper.createObjectNode();
+        finalRequest.put("max_completion_tokens", FINAL_COMPLETION_TOKENS);
+        finalRequest.put("store", false);
+        finalRequest.set("messages", messages.deepCopy());
         finalRequest.set("response_format", responseFormat());
         JsonNode response = metaSparkClient.complete(finalRequest);
-        promptTokens += response.path("usage").path("prompt_tokens").asInt(0);
-        completionTokens += response.path("usage").path("completion_tokens").asInt(0);
         String content = firstChoice(response).path("message").path("content").asText("");
         try {
-            return new AgentOutput(objectMapper.readTree(content), List.copyOf(toolsUsed),
-                    promptTokens, completionTokens);
+            JsonNode parsed = objectMapper.readTree(content);
+            if (parsed == null || !parsed.isObject()) {
+                throw new ModelProviderException("MODEL_OUTPUT_EMPTY",
+                        "Muse Spark returned an empty structured question set. Retry the request.", 502, null);
+            }
+            return new FinalSet(parsed, response.path("usage").path("prompt_tokens").asInt(0),
+                    response.path("usage").path("completion_tokens").asInt(0));
         } catch (JsonProcessingException exception) {
             throw new ModelProviderException("MODEL_OUTPUT_INVALID_JSON",
                     "Muse Spark did not return valid structured JSON.", 502, exception);
@@ -389,6 +428,13 @@ public class ShopperQuestionSetService {
             throw new ModelProviderException("MODEL_RESPONSE_SHAPE_INVALID",
                     "The Meta model did not return a chat completion message.", 502, null);
         }
+        if ("length".equals(choices.get(0).path("finish_reason").asText())) {
+            JsonNode usage = response.path("usage");
+            throw new ModelProviderException("MODEL_OUTPUT_TRUNCATED",
+                    "Muse Spark ran out of completion tokens before answering (prompt "
+                            + usage.path("prompt_tokens").asInt(-1) + ", completion "
+                            + usage.path("completion_tokens").asInt(-1) + "). Retry the request.", 502, null);
+        }
         return choices.get(0);
     }
 
@@ -420,4 +466,5 @@ public class ShopperQuestionSetService {
     private record ToolResult(JsonNode result, boolean success) { }
     private record AgentOutput(JsonNode output, List<String> toolNames, int promptTokens,
                                int completionTokens) { }
+    private record FinalSet(JsonNode parsed, int promptTokens, int completionTokens) { }
 }
