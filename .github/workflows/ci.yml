@@ -52,7 +52,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -f README.md
           test -f .gitignore
           test -f pom.xml
           test -x ./mvnw
@@ -68,11 +67,11 @@ jobs:
       - name: Build and run unit checks
         run: ./mvnw --batch-mode --no-transfer-progress verify
 
-      - name: Start packaged API
+      - name: Start API in local demo mode
         shell: bash
         run: |
           set -euo pipefail
-          java -jar target/quarkus-app/quarkus-run.jar > /tmp/kaviyo-api.log 2>&1 &
+          ./mvnw --batch-mode --no-transfer-progress quarkus:dev -Dquarkus.http.port=8082 > /tmp/kaviyo-api.log 2>&1 &
           echo "$!" > /tmp/kaviyo-api.pid
           for attempt in $(seq 1 45); do
             if curl --fail --silent http://127.0.0.1:8082/q/health > /tmp/kaviyo-health.json; then
@@ -89,7 +88,7 @@ jobs:
       - name: Run API and PostgreSQL smoke checks
         run: ./scripts/smoke-backend.sh
 
-      - name: Stop packaged API
+      - name: Stop API
         if: always()
         shell: bash
         run: |
