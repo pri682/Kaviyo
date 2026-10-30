@@ -3,7 +3,7 @@ package com.kaviyo.backend.api;
 import com.kaviyo.backend.catalog.CatalogImportPersistenceException;
 import com.kaviyo.backend.scan.NotificationRecord;
 import com.kaviyo.backend.scan.ScanRepository;
-import com.kaviyo.importer.CatalogImportMapper;
+import com.kaviyo.backend.workspace.WorkspaceContext;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
@@ -23,12 +23,14 @@ import java.util.UUID;
 public final class NotificationResource {
     @Inject
     ScanRepository scanRepository;
+    @Inject
+    WorkspaceContext workspaceContext;
 
     @GET
     public Response list(@QueryParam("unreadOnly") boolean unreadOnly) {
         try {
             return Response.ok(new NotificationList("SYNTHETIC_DEMO",
-                    scanRepository.listNotifications(CatalogImportMapper.LOCAL_DEMO_WORKSPACE_ID, unreadOnly)))
+                    scanRepository.listNotifications(workspaceContext.workspaceId(), unreadOnly)))
                     .build();
         } catch (CatalogImportPersistenceException exception) {
             return Response.status(Response.Status.SERVICE_UNAVAILABLE)
@@ -49,7 +51,7 @@ public final class NotificationResource {
                     .build();
         }
         try {
-            if (!scanRepository.markNotificationRead(CatalogImportMapper.LOCAL_DEMO_WORKSPACE_ID,
+            if (!scanRepository.markNotificationRead(workspaceContext.workspaceId(),
                     id, Instant.now())) {
                 return Response.status(Response.Status.NOT_FOUND)
                         .entity(new ApiError("NOTIFICATION_NOT_FOUND", "No notification exists with that ID."))
