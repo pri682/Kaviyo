@@ -97,6 +97,83 @@ public class CatalogImportRepository {
         return products.values().stream().map(ProductBuilder::toSnapshot).toList();
     }
 
+    public CatalogProductPage listCurrentProducts(UUID workspaceId, int limit, int offset) {
+        String sql = """
+                WITH product_page AS (
+                    SELECT p.id, p.external_product_id, p.title, p.sku, p.brand, p.category,
+                           p.description, p.price, p.currency, p.availability, p.product_url,
+                           p.last_import_id, p.updated_at
+                    FROM catalog_products p
+                    WHERE p.workspace_id = ?
+                    ORDER BY p.external_product_id
+                    LIMIT ? OFFSET ?
+                )
+                SELECT p.id, p.external_product_id, p.title, p.sku, p.brand, p.category,
+                       p.description, p.price, p.currency, p.availability, p.product_url,
+                       p.last_import_id, p.updated_at, a.attribute_key, a.attribute_value
+                FROM product_page p
+                LEFT JOIN catalog_product_attributes a ON a.product_id = p.id
+                ORDER BY p.external_product_id, a.attribute_key
+                """;
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setObject(1, workspaceId);
+            statement.setInt(2, limit + 1);
+            statement.setInt(3, offset);
+            List<CatalogProductSnapshot> products = readProductRows(statement);
+            boolean hasMore = products.size() > limit;
+            return new CatalogProductPage(hasMore ? products.subList(0, limit) : products, hasMore);
+        } catch (SQLException exception) {
+            throw new CatalogImportPersistenceException("Catalog products could not be loaded.", exception);
+        }
+    }
+
+    public List<CatalogProductSnapshot> findCurrentProducts(UUID workspaceId, List<String> externalProductIds) {
+        if (externalProductIds.isEmpty()) return List.of();
+        String placeholders = String.join(",", java.util.Collections.nCopies(externalProductIds.size(), "?"));
+        String sql = """
+                SELECT p.id, p.external_product_id, p.title, p.sku, p.brand, p.category,
+                       p.description, p.price, p.currency, p.availability, p.product_url,
+                       p.last_import_id, p.updated_at, a.attribute_key, a.attribute_value
+                FROM catalog_products p
+                LEFT JOIN catalog_product_attributes a ON a.product_id = p.id
+                WHERE p.workspace_id = ? AND p.external_product_id IN (%s)
+                ORDER BY p.external_product_id, a.attribute_key
+                """.formatted(placeholders);
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setObject(1, workspaceId);
+            for (int index = 0; index < externalProductIds.size(); index++) {
+                statement.setString(index + 2, externalProductIds.get(index));
+            }
+            return readProductRows(statement);
+        } catch (SQLException exception) {
+            throw new CatalogImportPersistenceException("Selected catalog products could not be loaded.", exception);
+        }
+    }
+
+    private static List<CatalogProductSnapshot> readProductRows(PreparedStatement statement) throws SQLException {
+        Map<UUID, ProductBuilder> products = new LinkedHashMap<>();
+        try (ResultSet rows = statement.executeQuery()) {
+            while (rows.next()) {
+                UUID productId = rows.getObject("id", UUID.class);
+                ProductBuilder product = products.get(productId);
+                if (product == null) {
+                    product = new ProductBuilder(productId, rows.getString("external_product_id"),
+                            rows.getString("title"), rows.getString("sku"), rows.getString("brand"),
+                            rows.getString("category"), rows.getString("description"), rows.getBigDecimal("price"),
+                            rows.getString("currency"), rows.getString("availability"),
+                            rows.getString("product_url"), rows.getObject("last_import_id", UUID.class),
+                            rows.getTimestamp("updated_at").toInstant());
+                    products.put(productId, product);
+                }
+                String key = rows.getString("attribute_key");
+                if (key != null) product.attributes.put(key, rows.getString("attribute_value"));
+            }
+        }
+        return products.values().stream().map(ProductBuilder::toSnapshot).toList();
+    }
+
     private static void insertImport(Connection connection, ConfirmedCatalogImport batch) throws SQLException {
         String sql = """
                 INSERT INTO catalog_imports (
@@ -155,7 +232,7 @@ public class CatalogImportRepository {
             }
             statement.setString(10, product.currency());
             statement.setString(11, product.availability());
-            statement.setString(12, product.productUrl().toString());
+            statement.setString(12, product.productUrl() == null ? null : product.productUrl().toString());
             statement.setObject(13, batch.importId());
             statement.setTimestamp(14, Timestamp.from(batch.confirmedAt()));
             statement.setTimestamp(15, Timestamp.from(batch.confirmedAt()));
@@ -243,6 +320,10 @@ public class CatalogImportRepository {
             UUID lastImportId,
             Instant updatedAt,
             Map<String, String> attributes) {
+    }
+
+    public record CatalogProductPage(List<CatalogProductSnapshot> products, boolean hasMore) {
+        public CatalogProductPage { products = List.copyOf(products); }
     }
 
     private static final class ProductBuilder {
