@@ -3,6 +3,7 @@ package com.kaviyo.backend.api;
 import com.kaviyo.backend.catalog.CatalogImportConfirmation;
 import com.kaviyo.backend.catalog.CatalogImportPersistenceException;
 import com.kaviyo.backend.catalog.CatalogImportRepository;
+import com.kaviyo.backend.workspace.WorkspaceContext;
 import com.kaviyo.importer.CatalogCsvPreviewService;
 import com.kaviyo.importer.CatalogImportMapper;
 import com.kaviyo.importer.CatalogImportPreview;
@@ -29,6 +30,8 @@ public final class CatalogImportConfirmResource {
 
     @Inject
     CatalogImportRepository importRepository;
+    @Inject
+    WorkspaceContext workspaceContext;
 
     @POST
     public Response confirm(String csv, @HeaderParam("X-Kaviyo-Confirm-Hash") String confirmationHash) {
@@ -62,7 +65,7 @@ public final class CatalogImportConfirmResource {
                         .build();
             }
             CatalogImportConfirmation confirmation = importRepository.confirm(
-                    importMapper.confirmed(preview, Instant.now()));
+                    importMapper.confirmed(preview, Instant.now(), workspaceContext.workspaceId()));
             return Response.status(Response.Status.CREATED).entity(confirmation).build();
         } catch (CsvPreviewException exception) {
             return Response.status(Response.Status.BAD_REQUEST)
