@@ -21,7 +21,8 @@ import java.util.regex.Pattern;
 /** Validates merchant CSV input without saving it or fetching product URLs. */
 public final class CatalogCsvPreviewService {
     private static final int MAX_CSV_BYTES = 1_048_576;
-    private static final int MAX_ROWS = 500;
+    // Row guard for the synchronous preview path; the 1M byte cap still bounds worst case (~2500 small rows).
+    private static final int MAX_ROWS = 2500;
     private static final int MAX_COLUMNS = 100;
     private static final int MAX_CELL_CHARACTERS = 20_000;
     private static final int MAX_PRICE_CHARACTERS = 32;
@@ -30,7 +31,7 @@ public final class CatalogCsvPreviewService {
     private static final int MAX_OPTIONAL_LABEL_CHARACTERS = 180;
     private static final int MAX_ATTRIBUTE_KEY_CHARACTERS = 160;
 
-    private static final Set<String> REQUIRED_HEADERS = Set.of("product_id", "title", "url");
+    private static final Set<String> REQUIRED_HEADERS = Set.of("title");
     private static final Set<String> SUPPORTED_HEADERS = Set.of(
             "product_id", "title", "sku", "brand", "category", "description",
             "price", "currency", "availability", "url");
@@ -125,6 +126,9 @@ public final class CatalogCsvPreviewService {
         String availabilityValue = value(cells, headerPositions, "availability");
         String urlValue = value(cells, headerPositions, "url");
 
+        if (!headerPositions.containsKey("product_id") && !isBlank(row.title)) {
+            row.productId = !isBlank(row.sku) ? row.sku : "auto-" + sha256(!isBlank(urlValue) ? urlValue : row.title);
+        }
         if (isBlank(row.productId)) {
             row.errors.add("Product ID is required.");
         } else if (row.productId.length() > MAX_PRODUCT_ID_CHARACTERS) {
@@ -139,6 +143,7 @@ public final class CatalogCsvPreviewService {
         validateOptionalLength(row, "Brand", row.brand);
         validateOptionalLength(row, "Category", row.category);
         row.productUrl = parseProductUrl(urlValue, row.errors);
+        if (isBlank(urlValue)) row.warnings.add("No product URL supplied; page scanning is unavailable.");
         row.price = parsePrice(priceValue, row.errors);
         if (!isBlank(row.currency)) {
             row.currency = row.currency.toUpperCase(Locale.ROOT);
@@ -225,7 +230,7 @@ public final class CatalogCsvPreviewService {
 
     private static URI parseProductUrl(String value, List<String> errors) {
         if (isBlank(value)) {
-            errors.add("Product URL is required.");
+            // Products without a page can still be compared using their catalog facts.
             return null;
         }
         try {
@@ -253,7 +258,21 @@ public final class CatalogCsvPreviewService {
             if (i == 0 && header.startsWith("\uFEFF")) {
                 header = header.substring(1);
             }
-            headers.add(header.toLowerCase(Locale.ROOT));
+            String label = header.toLowerCase(Locale.ROOT);
+            String field = label.replaceAll("[\\s-]+", "_");
+            String mapped = switch (field) {
+                case "id", "item_id", "productid" -> "product_id";
+                case "name", "product", "product_name", "product_title", "item_name" -> "title";
+                case "link", "product_url", "product_link", "website" -> "url";
+                case "variant_sku", "stock_keeping_unit" -> "sku";
+                case "vendor", "manufacturer" -> "brand";
+                case "product_type" -> "category";
+                case "unit_price", "variant_price" -> "price";
+                default -> SUPPORTED_HEADERS.contains(field) ? field : null;
+            };
+            if (mapped != null) headers.add(mapped);
+            else if (ATTRIBUTE_HEADER.matcher(label).matches()) headers.add(label);
+            else headers.add("attribute." + (label.isEmpty() ? "column_" + (i + 1) : label));
         }
         return headers;
     }
@@ -267,10 +286,6 @@ public final class CatalogCsvPreviewService {
             if (!uniqueHeaders.add(header)) {
                 throw new CsvPreviewException("CSV contains a duplicate column header: " + header + ".");
             }
-            if (!SUPPORTED_HEADERS.contains(header) && !ATTRIBUTE_HEADER.matcher(header).matches()) {
-                throw new CsvPreviewException("Unsupported CSV column: " + header
-                        + ". Product-specific fields must use the attribute.<name> format.");
-            }
             if (header.startsWith("attribute.")
                     && header.substring("attribute.".length()).length() > MAX_ATTRIBUTE_KEY_CHARACTERS) {
                 throw new CsvPreviewException("Product attribute names must be no longer than "
@@ -282,7 +297,7 @@ public final class CatalogCsvPreviewService {
                 .sorted()
                 .toList();
         if (!missingHeaders.isEmpty()) {
-            throw new CsvPreviewException("CSV is missing required columns: "
+            throw new CsvPreviewException("Choose the column containing product names in the upload form, or rename it to: "
                     + String.join(", ", missingHeaders) + ".");
         }
     }
@@ -310,8 +325,57 @@ public final class CatalogCsvPreviewService {
         }
     }
 
+    private static char delimiter(String csv) {
+        int[] counts = new int[3];
+        String candidates = ",;\t";
+        boolean quoted = false;
+        for (int i = 0; i < csv.length(); i++) {
+            char c = csv.charAt(i);
+            if (c == '"') quoted = !quoted;
+            if (quoted) continue;
+            if (c == '\n' || c == '\r') break;
+            int index = candidates.indexOf(c);
+            if (index >= 0) counts[index]++;
+        }
+        int best = 0;
+        for (int i = 1; i < counts.length; i++) if (counts[i] > counts[best]) best = i;
+        return candidates.charAt(best);
+    }
+
+    public static String mapTitleColumn(String csv, String titleColumn) {
+        if (isBlank(titleColumn)) return csv;
+        if (csv.getBytes(StandardCharsets.UTF_8).length > MAX_CSV_BYTES)
+            throw new CsvPreviewException("CSV exceeds the 1 MiB preview limit.");
+        List<List<String>> records = parseRecords(csv);
+        if (records.isEmpty()) throw new CsvPreviewException("CSV content is empty.");
+        var headers = new ArrayList<>(records.get(0));
+        int index = -1;
+        for (int i = 0; i < headers.size(); i++) {
+            if (headers.get(i).trim().equalsIgnoreCase(titleColumn.trim())) {
+                if (index >= 0) throw new CsvPreviewException("The selected column name appears twice.");
+                index = i;
+            }
+        }
+        if (index < 0) throw new CsvPreviewException("Product name column could not be found: " + titleColumn);
+        headers.set(index, "title");
+        records.set(0, headers);
+        StringBuilder output = new StringBuilder();
+        for (var row : records) {
+            for (int i = 0; i < row.size(); i++) {
+                if (i > 0) output.append(',');
+                String cell = row.get(i);
+                if (cell.contains(",") || cell.contains("\"") || cell.contains("\n") || cell.contains("\r"))
+                    output.append('"').append(cell.replace("\"", "\"\"")).append('"');
+                else output.append(cell);
+            }
+            output.append('\n');
+        }
+        return output.toString();
+    }
+
     private static List<List<String>> parseRecords(String input) {
         String csv = input.startsWith("\uFEFF") ? input.substring(1) : input;
+        char delimiter = delimiter(csv);
         List<List<String>> records = new ArrayList<>();
         List<String> row = new ArrayList<>();
         StringBuilder cell = new StringBuilder();
@@ -333,7 +397,7 @@ public final class CatalogCsvPreviewService {
                     cell.append(current);
                 }
             } else if (quoteClosed) {
-                if (current == ',') {
+                if (current == delimiter) {
                     addCell(row, cell);
                     quoteClosed = false;
                 } else if (current == '\r' || current == '\n') {
@@ -350,7 +414,7 @@ public final class CatalogCsvPreviewService {
                 }
                 cell.setLength(0);
                 quoted = true;
-            } else if (current == ',') {
+            } else if (current == delimiter) {
                 addCell(row, cell);
             } else if (current == '\r' || current == '\n') {
                 addCell(row, cell);
