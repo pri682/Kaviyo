@@ -32,6 +32,32 @@ public class ScanRepository {
     @Inject
     ObjectMapper objectMapper;
 
+    public StartedScan activateQueued(UUID workspaceId, UUID scanRunId, int attempt) {
+        String sql = """
+                UPDATE catalog_scan_runs r SET status = 'RUNNING'
+                FROM catalog_scan_jobs j
+                WHERE r.workspace_id = ? AND r.id = ? AND r.status IN ('QUEUED', 'RUNNING')
+                  AND j.workspace_id = r.workspace_id AND j.scan_run_id = r.id
+                  AND j.status = 'RUNNING' AND j.attempts = ?
+                RETURNING r.requested_products, r.started_at
+                """;
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setObject(1, workspaceId);
+            statement.setObject(2, scanRunId);
+            statement.setInt(3, attempt);
+            try (ResultSet row = statement.executeQuery()) {
+                if (!row.next()) {
+                    throw persistenceError("The queued scan run is missing or already complete.", null);
+                }
+                return new StartedScan(scanRunId, workspaceId, row.getInt("requested_products"),
+                        row.getTimestamp("started_at").toInstant(), attempt);
+            }
+        } catch (SQLException exception) {
+            throw persistenceError("The queued scan could not be started.", exception);
+        }
+    }
+
     public StartedScan begin(UUID workspaceId, int requestedProducts, Instant startedAt) {
         UUID id = UUID.randomUUID();
         String sql = """
@@ -48,7 +74,7 @@ public class ScanRepository {
             statement.setInt(4, requestedProducts);
             statement.setTimestamp(5, Timestamp.from(startedAt));
             statement.executeUpdate();
-            return new StartedScan(id, workspaceId, requestedProducts, startedAt);
+            return new StartedScan(id, workspaceId, requestedProducts, startedAt, 0);
         } catch (SQLException exception) {
             throw persistenceError("A scan run could not be created.", exception);
         }
@@ -77,6 +103,7 @@ public class ScanRepository {
             connection.setAutoCommit(false);
             try (PreparedStatement productStatement = connection.prepareStatement(productSql);
                  PreparedStatement findingStatement = connection.prepareStatement(findingSql)) {
+                assertCurrentAttempt(connection, scan);
                 productStatement.setObject(1, scanProductId);
                 productStatement.setObject(2, scan.workspaceId());
                 productStatement.setObject(3, scan.id());
@@ -107,6 +134,20 @@ public class ScanRepository {
                     findingStatement.addBatch();
                 }
                 findingStatement.executeBatch();
+                try (PreparedStatement progress = connection.prepareStatement("""
+                        UPDATE catalog_scan_runs
+                        SET completed_products = (
+                            SELECT COUNT(*) FROM catalog_scan_products
+                            WHERE workspace_id = ? AND scan_run_id = ?
+                        )
+                        WHERE workspace_id = ? AND id = ? AND status = 'RUNNING'
+                        """)) {
+                    progress.setObject(1, scan.workspaceId());
+                    progress.setObject(2, scan.id());
+                    progress.setObject(3, scan.workspaceId());
+                    progress.setObject(4, scan.id());
+                    progress.executeUpdate();
+                }
                 connection.commit();
             } catch (SQLException | RuntimeException exception) {
                 connection.rollback();
@@ -134,6 +175,7 @@ public class ScanRepository {
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             try (PreparedStatement statement = connection.prepareStatement(update)) {
+                assertCurrentAttempt(connection, scan);
                 statement.setString(1, status.name());
                 statement.setObject(2, scan.workspaceId());
                 statement.setObject(3, scan.id());
@@ -240,6 +282,23 @@ public class ScanRepository {
         }
     }
 
+    private static void assertCurrentAttempt(Connection connection, StartedScan scan) throws SQLException {
+        if (scan.attempt() == 0) return;
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT attempts FROM catalog_scan_jobs
+                WHERE workspace_id = ? AND scan_run_id = ? AND status = 'RUNNING'
+                FOR UPDATE
+                """)) {
+            statement.setObject(1, scan.workspaceId());
+            statement.setObject(2, scan.id());
+            try (ResultSet row = statement.executeQuery()) {
+                if (!row.next() || row.getInt("attempts") != scan.attempt()) {
+                    throw persistenceError("This worker no longer owns the scan lease.", null);
+                }
+            }
+        }
+    }
+
     public Optional<CatalogImportRepository.CatalogProductSnapshot> capturedProduct(
             UUID workspaceId, UUID scanRunId, String externalProductId) {
         String sql = """
@@ -261,7 +320,7 @@ public class ScanRepository {
         }
     }
 
-    public Optional<UUID> findingId(UUID workspaceId, UUID scanRunId, String productId, String ruleCode) {
+    public Optional<UUID> findingId(UUID workspaceId, UUID scanRunId, UUID internalProductId, String ruleCode) {
         String sql = """
                 SELECT id FROM catalog_scan_findings
                 WHERE workspace_id = ? AND scan_run_id = ? AND product_id = ? AND rule_code = ?
@@ -270,7 +329,7 @@ public class ScanRepository {
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setObject(1, workspaceId);
             statement.setObject(2, scanRunId);
-            statement.setObject(3, productId);
+            statement.setObject(3, internalProductId);
             statement.setString(4, ruleCode);
             try (ResultSet rows = statement.executeQuery()) {
                 return rows.next() ? Optional.of(rows.getObject("id", UUID.class)) : Optional.empty();
@@ -400,7 +459,7 @@ public class ScanRepository {
         return new CatalogImportPersistenceException(message, cause);
     }
 
-    public record StartedScan(UUID id, UUID workspaceId, int requestedProducts, Instant startedAt) {
+    public record StartedScan(UUID id, UUID workspaceId, int requestedProducts, Instant startedAt, int attempt) {
     }
 
     private static final class ScanRunDetailMessages {
