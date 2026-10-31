@@ -12,15 +12,12 @@ import java.util.UUID;
 
 /** Converts the validated import preview into domain records after the user confirms it. */
 public final class CatalogImportMapper {
-    public static final UUID LOCAL_DEMO_WORKSPACE_ID =
-            UUID.fromString("00000000-0000-4000-8000-000000000001");
-
-    public ConfirmedCatalogImport confirmed(CatalogImportPreview preview, Instant confirmedAt) {
+    public ConfirmedCatalogImport confirmed(CatalogImportPreview preview, Instant confirmedAt, UUID workspaceId) {
         List<CatalogProductRecord> products = preview.rows().stream()
                 .map(row -> product(row, confirmedAt))
                 .toList();
         return new ConfirmedCatalogImport(
-                UUID.randomUUID(), LOCAL_DEMO_WORKSPACE_ID, preview.previewHash(), confirmedAt, products);
+                UUID.randomUUID(), workspaceId, preview.previewHash(), confirmedAt, products);
     }
 
     private static CatalogProductRecord product(CatalogImportRowPreview row, Instant confirmedAt) {
@@ -34,7 +31,7 @@ public final class CatalogImportMapper {
         add(observations, "price", row.price() == null ? null : row.price().toPlainString(), row.rowNumber(), confirmedAt);
         add(observations, "currency", row.currency(), row.rowNumber(), confirmedAt);
         add(observations, "availability", row.availability(), row.rowNumber(), confirmedAt);
-        add(observations, "url", row.productUrl().toString(), row.rowNumber(), confirmedAt);
+        add(observations, "url", row.productUrl() == null ? null : row.productUrl().toString(), row.rowNumber(), confirmedAt);
         row.attributes().forEach((key, value) ->
                 add(observations, "attribute." + key, value, row.rowNumber(), confirmedAt));
 
